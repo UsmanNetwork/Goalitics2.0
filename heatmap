@@ -1,0 +1,46 @@
+import pandas as pd
+import numpy as np
+import seaborn as sns
+import matplotlib.pyplot as plt
+
+# Data provided by the user
+data = {
+    'Model': ['Logistic Regression', 'Random Forest', 'Adapted Linear Regression'],
+    'Accuracy': [0.5896, 0.5906, 0.3966],
+    'Precision (Macro)': [0.5357, 0.5143, 0.6317],
+    'Recall (Macro)': [0.5230, 0.5173, 0.4521],
+    'F1-Score (Macro)': [0.5095, 0.4943, 0.3770],
+    'ROC-AUC (Macro, OVR)': [0.7295, 0.7309, 'N/A']
+}
+
+results_df = pd.DataFrame(data)
+
+# 1. Handle the 'N/A' entry for plotting
+# Replace 'N/A' with NaN (Not a Number)
+results_df['ROC-AUC (Macro, OVR)'] = results_df['ROC-AUC (Macro, OVR)'].replace('N/A', np.nan).astype(float)
+
+# 2. Set 'Model' as the index for the heatmap
+results_df = results_df.set_index('Model')
+
+# 3. Create the heatmap
+plt.figure(figsize=(10, 5))
+
+# Use the 'viridis' colormap (darker color = higher value/better performance)
+sns.heatmap(
+    results_df,
+    annot=True,
+    fmt=".3f",
+    cmap="viridis",
+    linewidths=.5,
+    cbar_kws={'label': 'Performance Metric Value'}
+)
+
+plt.title('Heatmap of Baseline Model Performance Metrics')
+plt.ylabel('Model')
+plt.xlabel('Metrics')
+plt.xticks(rotation=45, ha='right')
+plt.yticks(rotation=0)
+plt.tight_layout()
+
+# Save the plot
+plt.savefig('baseline_heatmap.png')
