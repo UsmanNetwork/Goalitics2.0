@@ -1,0 +1,57 @@
+def calculate_optimal_form_score(df_team, window=5):
+    """
+    Implements the A* logic: calculates the rolling cumulative cost (g(n))
+    over the window for a single team.
+    """
+
+    # 1. Determine the outcome cost (g(n)) for the team being analyzed
+    def get_team_cost(row):
+        result = row['FullTimeResult']
+        role = row['Role']
+
+        # Win (Cost 0)
+        if (role == 'H' and result == 'H') or (role == 'A' and result == 'A'):
+            return 0
+        # Draw (Cost 1)
+        elif result == 'D':
+            return 1
+        # Loss (Cost 3)
+        else:
+            return 3
+
+    # Apply the cost function to create the g(n) column
+    df_team['Cost'] = df_team.apply(get_team_cost, axis=1)
+
+    # 2. Calculate the rolling sum (cumulative cost) and shift by 1 (PREVENTS DATA LEAKAGE)
+    df_team['Optimal_Form_Score'] = df_team['Cost'].rolling(
+        window=window, min_periods=1
+    ).sum().shift(1).fillna(0) # Fill initial NaNs with 0 (assuming perfect form before history)
+
+    return df_team[['MatchDate', 'Team', 'Optimal_Form_Score']]
+
+# --- Prepare Data for Sequential Group-wise Application ---
+
+# 1. Prepare Home Matches: Rename and add 'Role'
+home_matches = DH[['MatchDate', 'HomeTeam', 'FullTimeResult']].copy()
+home_matches.rename(columns={'HomeTeam': 'Team'}, inplace=True)
+home_matches['Role'] = 'H'
+
+# 2. Prepare Away Matches: Rename and add 'Role'
+away_matches = DH[['MatchDate', 'AwayTeam', 'FullTimeResult']].copy()
+away_matches.rename(columns={'AwayTeam': 'Team'}, inplace=True)
+away_matches['Role'] = 'A'
+
+# 3. Combine and sort
+all_matches = pd.concat([home_matches, away_matches]).sort_values(by='MatchDate').reset_index(drop=True)
+
+# 4. Apply the A* logic to each team group
+form_scores = all_matches.groupby('Team', group_keys=False).apply(
+    calculate_optimal_form_score, window=5
+)
+
+# Prepare the scores for merging in the next step
+form_scores.rename(columns={'Team': 'TeamName'}, inplace=True)
+form_scores['Form_Check'] = form_scores['MatchDate'].astype(str) + form_scores['TeamName']
+
+print("Optimal Form Scores calculated. Sample (First 10 rows):")
+print(form_scores.head(10))
