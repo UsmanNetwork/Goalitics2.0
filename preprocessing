@@ -1,0 +1,31 @@
+# Prepare the main DataFrame for merging
+DH['Home_Check'] = DH['MatchDate'].astype(str) + DH['HomeTeam']
+DH['Away_Check'] = DH['MatchDate'].astype(str) + DH['AwayTeam']
+
+# 1. Merge the Optimal Form Score for the Home Team
+DH = pd.merge(DH, form_scores[['Form_Check', 'Optimal_Form_Score']],
+              left_on='Home_Check', right_on='Form_Check',
+              how='left')
+DH.rename(columns={'Optimal_Form_Score': 'Home_Optimal_Form_Score'}, inplace=True)
+DH.drop(columns=['Form_Check', 'Home_Check'], inplace=True)
+
+# 2. Merge the Optimal Form Score for the Away Team
+DH = pd.merge(DH, form_scores[['Form_Check', 'Optimal_Form_Score']],
+              left_on='Away_Check', right_on='Form_Check',
+              how='left')
+DH.rename(columns={'Optimal_Form_Score': 'Away_Optimal_Form_Score'}, inplace=True)
+DH.drop(columns=['Form_Check', 'Away_Check'], inplace=True)
+
+
+# 3. Create the crucial predictive feature: Form Differential
+# (Away Score - Home Score). Positive value favors the Home team.
+DH['Optimal_Form_Differential'] = DH['Away_Optimal_Form_Score'] - DH['Home_Optimal_Form_Score']
+
+# Display the final integrated features
+print("\n--- Final Integrated Feature DataFrame Head (Deliverable 2 Working Example Complete) ---")
+print(DH[['MatchDate', 'HomeTeam', 'AwayTeam', 'FullTimeResult',
+          'Home_Optimal_Form_Score', 'Away_Optimal_Form_Score',
+          'Optimal_Form_Differential']].head(10))
+
+# Save the updated DataFrame for Deliverable 3
+DH.to_csv('epl_with_agent_features.csv', index=False)
