@@ -1,0 +1,12 @@
+import pandas as pd
+import numpy as np
+
+# Load the dataset (adjust path if needed, e.g., '/content/epl_final.csv')
+DH = pd.read_csv('epl_final.csv')
+
+# Convert MatchDate to datetime object and sort the data chronologically (CRITICAL)
+DH['MatchDate'] = pd.to_datetime(DH['MatchDate'])
+DH = DH.sort_values(by='MatchDate').reset_index(drop=True)
+
+print("Data Loaded and Sorted. Head of DataFrame:")
+print(DH[['MatchDate', 'HomeTeam', 'AwayTeam', 'FullTimeResult']].head())
