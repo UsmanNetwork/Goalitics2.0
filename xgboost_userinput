@@ -1,0 +1,221 @@
+import pandas as pd
+import numpy as np
+import xgboost as xgb
+from sklearn.preprocessing import LabelEncoder, StandardScaler, OneHotEncoder
+from sklearn.compose import ColumnTransformer
+from imblearn.over_sampling import SMOTE
+from imblearn.pipeline import Pipeline as ImbPipeline
+from sklearn.model_selection import TimeSeriesSplit, GridSearchCV
+from sklearn.metrics import f1_score, make_scorer
+
+# --- 1. SETUP: RE-CREATE AND TRAIN THE FINAL BEST MODEL ---
+# NOTE: This block is necessary to make sure the final_best_pipeline
+# and the LabelEncoder (le) are available in the current session.
+
+# Load the enriched dataset (Ensure this path is correct after mounting your drive)
+try:
+    # Use the filename as a placeholder. You must ensure the file is loaded
+    # and the df variable holds the full dataset.
+    df = pd.read_csv('epl_with_agent_features.csv')
+except FileNotFoundError:
+    print("FATAL ERROR: 'epl_with_agent_features.csv' not found. Cannot set up model.")
+    # Exit or handle error gracefully in a real application
+
+# Target Encoding (H=2, D=1, A=0)
+le = LabelEncoder()
+df['Target'] = le.fit_transform(df['FullTimeResult'])
+
+# Feature Selection
+numerical_features = ['HomeShots', 'AwayShots', 'HomeShotsOnTarget', 'AwayShotsOnTarget',
+                      'HomeCorners', 'AwayCorners', 'HomeFouls', 'AwayFouls',
+                      'HomeYellowCards', 'AwayYellowCards', 'HomeRedCards', 'AwayRedCards',
+                      'Home_Optimal_Form_Score', 'Away_Optimal_Form_Score', 'Optimal_Form_Differential']
+categorical_features = ['HomeTeam', 'AwayTeam']
+
+X = df[numerical_features + categorical_features]
+y = df['Target']
+
+# Time-Series Train-Test Split (80/20 split)
+split_point = int(0.8 * len(X))
+X_train, _ = X.iloc[:split_point], X.iloc[split_point:]
+y_train, _ = y.iloc[:split_point], y.iloc[split_point:]
+
+# Preprocessing Pipeline Definition (sparse_output=False required for imblearn)
+preprocessor = ColumnTransformer(
+    transformers=[
+        ('num', StandardScaler(), numerical_features),
+        ('cat', OneHotEncoder(handle_unknown='ignore', sparse_output=False), categorical_features)
+    ],
+    remainder='passthrough'
+)
+
+# Final Best Parameters from Grid Search
+best_params = {'classifier__gamma': 0, 'classifier__learning_rate': 0.05, 'classifier__max_depth': 7}
+
+xgb_classifier = xgb.XGBClassifier(
+    objective='multi:softmax',
+    num_class=3,
+    eval_metric='mlogloss',
+    random_state=42,
+    n_estimators=100,
+    use_label_encoder=False,
+    **{k.replace('classifier__', ''): v for k, v in best_params.items()}
+)
+
+smote_sampler = SMOTE(random_state=42)
+
+# Create the final best pipeline
+final_best_pipeline = ImbPipeline(steps=[
+    ('preprocessor', preprocessor),
+    ('sampler', smote_sampler),
+    ('classifier', xgb_classifier)
+])
+
+# Fit the final model on the training data
+print("Fitting the final model for prediction...")
+final_best_pipeline.fit(X_train, y_train)
+print("Model ready for real-time prediction.")
+
+
+# --- 2. THE PREDICTION FUNCTION ---
+
+def predict_match_outcome(home_team_name, away_team_name, full_data_df, model_pipeline, label_encoder):
+    """
+    Predicts the outcome of a single match based on team names.
+
+    Args:
+        home_team_name (str): Name of the home team.
+        away_team_name (str): Name of the away team.
+        full_data_df (pd.DataFrame): The full, enriched dataset containing form scores.
+        model_pipeline (ImbPipeline): The final, fitted XGBoost pipeline.
+        label_encoder (LabelEncoder): The fitted encoder for the target variable.
+
+    Returns:
+        str: The predicted result ('Home Win', 'Draw', or 'Away Win').
+    """
+
+    # Check if teams exist in the dataset
+    all_teams = pd.concat([full_data_df['HomeTeam'], full_data_df['AwayTeam']]).unique()
+    if home_team_name not in all_teams or away_team_name not in all_teams:
+        return "ERROR: One or both team names were not found in the historical dataset. Check spelling."
+
+    try:
+        # 2.1. Feature Engineering (Look up the most recent form scores)
+
+        # Get the last recorded form score for the Home Team
+        # We look for the HomeTeam's score when they were the HomeTeam
+        home_form_score = full_data_df[full_data_df['HomeTeam'] == home_team_name]['Home_Optimal_Form_Score'].iloc[-1]
+
+        # Get the last recorded form score for the Away Team
+        # We look for the AwayTeam's score when they were the AwayTeam
+        away_form_score = full_data_df[full_data_df['AwayTeam'] == away_team_name]['Away_Optimal_Form_Score'].iloc[-1]
+
+        # Calculate the crucial feature: Differential
+        differential = away_form_score - home_form_score
+
+        # 2.2. Create the Single Input DataFrame (All required features)
+
+        # We must provide all features, even if most are zeroed out for a hypothetical match
+        input_data = {
+            'HomeShots': [0], 'AwayShots': [0],
+            'HomeShotsOnTarget': [0], 'AwayShotsOnTarget': [0],
+            'HomeCorners': [0], 'AwayCorners': [0],
+            'HomeFouls': [0], 'AwayFouls': [0],
+            'HomeYellowCards': [0], 'AwayYellowCards': [0],
+            'HomeRedCards': [0], 'AwayRedCards': [0],
+            'Home_Optimal_Form_Score': [home_form_score],
+            'Away_Optimal_Form_Score': [away_form_score],
+            'Optimal_Form_Differential': [differential],
+            'HomeTeam': [home_team_name],
+            'AwayTeam': [away_team_name]
+        }
+
+        # NOTE: We set all raw match stats (Shots, Fouls, Cards) to 0 because
+        # we are predicting before the match, and these features are highly volatile.
+        # The prediction relies almost entirely on the historical 'Optimal_Form_Differential'
+        # and the one-hot encoded team names.
+
+        input_df = pd.DataFrame(input_data)
+
+        # 2.3. Prediction
+
+        # Predict the encoded target (0, 1, or 2)
+        predicted_encoded = model_pipeline.predict(input_df)
+
+        # Decode the result back to the original label ('H', 'D', 'A')
+        predicted_label = label_encoder.inverse_transform(predicted_encoded)[0]
+
+        # 2.4. Format Output
+
+        result_map = {
+            'H': f"PREDICTED WINNER: {home_team_name} (Home)",
+            'D': "PREDICTED RESULT: Draw",
+            'A': f"PREDICTED WINNER: {away_team_name} (Away)"
+        }
+
+        return result_map.get(predicted_label, "Prediction Error")
+
+    except IndexError:
+        return f"ERROR: Could not find recent form scores for {home_team_name} or {away_team_name}. Check data completeness."
+    except Exception as e:
+        return f"An unexpected error occurred during prediction: {e}"
+
+
+# --- 3. INTERACTIVE PREDICTION AND EXAMPLES ---
+
+def run_interactive_prediction(full_data_df, model_pipeline, label_encoder):
+    """
+    Prompts the user for team names and runs the prediction logic.
+    """
+
+    print("\n" + "="*50)
+    print("         INTERACTIVE MATCH PREDICTOR")
+    print("="*50)
+
+    # 3.1. Get user input
+    all_teams = pd.concat([full_data_df['HomeTeam'], full_data_df['AwayTeam']]).unique().tolist()
+    print("Available teams in the dataset (case-sensitive):")
+    print(", ".join(all_teams))
+    print("-" * 50)
+
+    home_team = input("Enter the name of the HOME team (e.g., Arsenal): ")
+    away_team = input("Enter the name of the AWAY team (e.g., Liverpool): ")
+
+    # 3.2. Run prediction
+    prediction_result = predict_match_outcome(
+        home_team,
+        away_team,
+        full_data_df,
+        model_pipeline,
+        label_encoder
+    )
+
+    print("-" * 50)
+    print(f"Prediction for {home_team} vs {away_team}:")
+    print(f"-> {prediction_result}")
+    print("="*50 + "\n")
+
+
+# Initial check and setup of common teams for test cases
+common_teams = df['HomeTeam'].value_counts().head(5).index.tolist()
+
+if len(common_teams) >= 2:
+    print("\n--- Example Test Cases ---")
+
+    # Test Case 1: Strong Home Team vs. Weaker Away Team
+    team1 = common_teams[0]
+    team2 = common_teams[1]
+    print(f"\nTest 1: {team1} (Home) vs. {team2} (Away)")
+    prediction1 = predict_match_outcome(team1, team2, df, final_best_pipeline, le)
+    print(prediction1)
+
+    # Test Case 2: Reversed Fixture (Same teams, different venue)
+    print(f"\nTest 2 (Reversed): {team2} (Home) vs. {team1} (Away)")
+    prediction2 = predict_match_outcome(team2, team1, df, final_best_pipeline, le)
+    print(prediction2)
+
+    # --- Run the interactive function after the automatic tests ---
+    run_interactive_prediction(df, final_best_pipeline, le)
+
+else:
+    print("Could not retrieve enough team names for examples. Please ensure your DataFrame is loaded.")
