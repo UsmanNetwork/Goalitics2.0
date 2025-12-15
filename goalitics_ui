@@ -1,0 +1,317 @@
+import gradio as gr
+import pandas as pd
+import numpy as np
+import xgboost as xgb
+from sklearn.preprocessing import LabelEncoder, StandardScaler, OneHotEncoder
+from sklearn.compose import ColumnTransformer
+from imblearn.over_sampling import SMOTE
+from imblearn.pipeline import Pipeline as ImbPipeline
+import warnings
+from typing import Dict, Any, List
+
+# Suppress warnings
+warnings.filterwarnings("ignore")
+
+# --- CUSTOM CSS FOR BEAUTY AND INTERACTIVITY ---
+CUSTOM_CSS = """
+/* Keyframes for a subtle, interactive pulse effect */
+@keyframes glow {
+    0% { box-shadow: 0 0 10px rgba(13, 110, 253, 0.5); }
+    50% { box-shadow: 0 0 25px rgba(13, 110, 253, 0.8), 0 0 5px rgba(255, 255, 255, 0.8); }
+    100% { box-shadow: 0 0 10px rgba(13, 110, 253, 0.5); }
+}
+
+/* Keyframes for ball movement */
+@keyframes ball-home {
+    from { transform: translateX(0); }
+    to { transform: translateX(-15px); }
+}
+@keyframes ball-away {
+    from { transform: translateX(0); }
+    to { transform: translateX(15px); }
+}
+
+/* Background: Dark Mode / Football Texture */
+body {
+    background-color: #121212; /* Very dark gray/black */
+    /* Subtle geometric pattern simulating the paneling of a football */
+    background-image:
+        linear-gradient(45deg, rgba(255, 255, 255, 0.03) 25%, transparent 25%),
+        linear-gradient(-45deg, rgba(255, 255, 255, 0.03) 25%, transparent 25%),
+        linear-gradient(45deg, transparent 75%, rgba(255, 255, 255, 0.03) 75%),
+        linear-gradient(-45deg, transparent 75%, rgba(255, 255, 255, 0.03) 75%);
+    background-size: 40px 40px;
+    background-position: 0 0, 0 20px, 20px -20px, -20px 0px;
+}
+
+/* Main Gradio Container (Interactive Element) */
+.gradio-container {
+    max-width: 900px;
+    margin: 50px auto;
+    background-color: rgba(40, 40, 40, 0.98); /* Darker container background */
+    padding: 30px;
+    border-radius: 20px;
+    border: 5px solid #0d6efd;
+    /* Apply subtle pulse animation */
+    animation: glow 3s infinite alternate;
+}
+
+/* Header and Description Styling */
+h1 {
+    color: #0d6efd !important;
+    text-align: center;
+    font-size: 2.8em;
+    font-family: 'Arial Black', sans-serif;
+    text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.3);
+}
+
+/* Prediction Result Visualization */
+.prediction-output-container {
+    margin-top: 25px;
+    border-top: 2px solid #ccc;
+    padding-top: 20px;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    text-align: center;
+}
+
+.team-prediction {
+    flex-grow: 1;
+    padding: 15px;
+    border-radius: 10px;
+    font-size: 1.2em;
+    font-weight: bold;
+    color: white; /* Change default text to white for dark background */
+    transition: background-color 0.5s ease;
+}
+.draw-prediction {
+    width: 30%;
+    margin: 0 10px;
+    background-color: #ffc107;
+    color: #333 !important; /* Keep draw text dark for contrast on yellow */
+    border: 3px solid #e0a800;
+}
+
+/* Visual Feedback on Prediction */
+.prediction-output-container .H {
+    background-color: #28a745; color: white; border: 3px solid #1e7e34;
+}
+.prediction-output-container .A {
+    background-color: #dc3545; color: white; border: 3px solid #bd2130;
+}
+
+/* Interactive Ball Icon */
+.ball-icon {
+    font-size: 2em;
+    margin: 0 20px;
+    display: inline-block;
+    transition: transform 0.5s ease;
+}
+.ball-icon.H-move { animation: ball-home 0.5s ease forwards; }
+.ball-icon.A-move { animation: ball-away 0.5s ease forwards; }
+
+/* Button Styling */
+button {
+    background-color: #0d6efd !important;
+    color: white !important;
+    border: none !important;
+    border-radius: 8px !important;
+    font-weight: bold !important;
+}
+"""
+
+# --- Model Loading and Initialization (Placeholder logic maintained) ---
+
+# Global variables to be initialized after data loading
+df: pd.DataFrame
+le: LabelEncoder
+final_best_pipeline: ImbPipeline
+ALL_TEAMS: List[str]
+
+# Dummy features based on user's prediction logic
+DUMMY_FORM_FEATURES = [
+    'Home_Optimal_Form_Score', 'Away_Optimal_Form_Score', 'Optimal_Form_Differential'
+]
+NUMERICAL_FEATURES = [
+    'HomeShots', 'AwayShots', 'HomeShotsOnTarget', 'AwayShotsOnTarget',
+    'HomeCorners', 'AwayCorners', 'HomeFouls', 'AwayFouls',
+    'HomeYellowCards', 'AwayYellowCards', 'HomeRedCards', 'AwayRedCards'
+] + DUMMY_FORM_FEATURES
+CATEGORICAL_FEATURES = ['HomeTeam', 'AwayTeam']
+ALL_FEATURES = NUMERICAL_FEATURES + CATEGORICAL_FEATURES
+
+def initialize_model(data_path: str):
+    """Loads data, prepares pipeline, and trains the final XGBoost model."""
+    global df, le, final_best_pipeline, ALL_TEAMS
+
+    # Try loading user's specific file, fall back to epl_final.csv
+    try:
+        df = pd.read_csv(data_path)
+    except FileNotFoundError:
+        try:
+            df_base = pd.read_csv('epl_final.csv')
+            print(f"File '{data_path}' not found. Using 'epl_final.csv' with dummy form scores.")
+            for col in DUMMY_FORM_FEATURES:
+                df_base[col] = np.random.rand(len(df_base)) * 10
+            df = df_base
+        except FileNotFoundError:
+            print("FATAL ERROR: Neither 'epl_with_agent_features.csv' nor 'epl_final.csv' found.")
+            return None
+    except Exception as e:
+        print(f"An error occurred loading the data: {e}")
+        return None
+
+    # Target Encoding (H, D, A)
+    le = LabelEncoder()
+    df['Target'] = le.fit_transform(df['FullTimeResult'])
+
+    X = df[ALL_FEATURES]
+    y = df['Target']
+
+    # Time-Series Train-Test Split (80/20 split)
+    split_point = int(0.8 * len(X))
+    X_train, _ = X.iloc[:split_point], X.iloc[split_point:]
+    y_train, _ = y.iloc[:split_point], y.iloc[split_point:]
+
+    # Preprocessing Pipeline Definition
+    preprocessor = ColumnTransformer(
+        transformers=[
+            ('num', StandardScaler(), NUMERICAL_FEATURES),
+            ('cat', OneHotEncoder(handle_unknown='ignore', sparse_output=False), CATEGORICAL_FEATURES)
+        ],
+        remainder='passthrough'
+    )
+
+    # XGBoost configuration (Based on user's provided code)
+    best_params = {'classifier__gamma': 0, 'classifier__learning_rate': 0.05, 'classifier__max_depth': 7}
+    xgb_classifier = xgb.XGBClassifier(
+        objective='multi:softmax', num_class=3, eval_metric='mlogloss', random_state=42, n_estimators=100,
+        use_label_encoder=False, **{k.replace('classifier__', ''): v for k, v in best_params.items()}
+    )
+    smote_sampler = SMOTE(random_state=42)
+
+    final_best_pipeline = ImbPipeline(steps=[
+        ('preprocessor', preprocessor), ('sampler', smote_sampler), ('classifier', xgb_classifier)
+    ])
+
+    print("Fitting the final XGBoost model...")
+    final_best_pipeline.fit(X_train, y_train)
+    print("Model fitting complete.")
+
+    ALL_TEAMS = pd.concat([df['HomeTeam'], df['AwayTeam']]).unique().tolist()
+    ALL_TEAMS.sort()
+
+    return final_best_pipeline
+
+# Attempt initialization
+final_best_pipeline = initialize_model('epl_with_agent_features.csv')
+if final_best_pipeline is None:
+    # Use epl_final.csv for basic functionality if the agent file is absent
+    final_best_pipeline = initialize_model('epl_final.csv')
+
+
+# --- THE PREDICTION FUNCTION (Returns Dynamic HTML) ---
+def predict_match_outcome(home_team_name: str, away_team_name: str) -> str:
+    """Predicts the outcome and formats a dynamic HTML string."""
+    if final_best_pipeline is None:
+        return "<p style='color: red;'>Model is not initialized. Check data files.</p>"
+
+    if home_team_name not in ALL_TEAMS or away_team_name not in ALL_TEAMS:
+        return "<p style='color: red;'>ERROR: One or both teams are unrecognized.</p>"
+
+    try:
+        # 1. Retrieve the last recorded 'Optimal_Form_Score' for each team
+        home_form_score_series = df[df['HomeTeam'] == home_team_name]['Home_Optimal_Form_Score']
+        home_form_score = home_form_score_series.iloc[-1] if not home_form_score_series.empty else 5.0
+
+        away_form_score_series = df[df['AwayTeam'] == away_team_name]['Away_Optimal_Form_Score']
+        away_form_score = away_form_score_series.iloc[-1] if not away_form_score_series.empty else 5.0
+
+        differential = home_form_score - away_form_score
+
+        # 2. Create input data for prediction
+        input_data = {
+            k: [0] for k in NUMERICAL_FEATURES # All match stats are zeroed out
+        }
+        input_data.update({
+            'Home_Optimal_Form_Score': [home_form_score],
+            'Away_Optimal_Form_Score': [away_form_score],
+            'Optimal_Form_Differential': [differential],
+            'HomeTeam': [home_team_name],
+            'AwayTeam': [away_team_name]
+        })
+        input_df = pd.DataFrame(input_data)
+
+        # 3. Predict and get probabilities
+        predicted_encoded = final_best_pipeline.predict(input_df)[0]
+        probabilities = final_best_pipeline.predict_proba(input_df)[0]
+        predicted_label = le.inverse_transform([predicted_encoded])[0]
+        prob_map = {le.classes_[i]: p for i, p in enumerate(probabilities)}
+
+        # 4. Construct Dynamic Visualization HTML
+
+        # Determine styling and ball movement class
+        home_class = 'H' if predicted_label == 'H' else ''
+        away_class = 'A' if predicted_label == 'A' else ''
+        ball_movement_class = f"{predicted_label}-move" if predicted_label != 'D' else ''
+
+        if predicted_label == 'H':
+            outcome_text = f"{home_team_name} WINS"
+        elif predicted_label == 'D':
+            outcome_text = "DRAW"
+        else:
+            outcome_text = f"{away_team_name} WINS"
+
+        prob_details = f"H: **{prob_map['H']:.2f}** | D: **{prob_map['D']:.2f}** | A: **{prob_map['A']:.2f}**"
+
+        html_output = f"""
+        <div class="prediction-output-container">
+            <div class="team-prediction {home_class}">
+                {home_team_name}<br>Prob: {prob_map['H']:.2f}
+            </div>
+
+            <div class="ball-icon {ball_movement_class}">
+                ⚽
+            </div>
+
+            <div class="team-prediction draw-prediction {'D' if predicted_label == 'D' else ''}">
+                {outcome_text}<br>
+                <span style="font-size:0.9em; font-weight:normal;">{prob_details}</span>
+            </div>
+
+            <div class="ball-icon">
+
+            </div>
+
+            <div class="team-prediction {away_class}">
+                {away_team_name}<br>Prob: {prob_map['A']:.2f}
+            </div>
+        </div>
+        """
+        return html_output
+
+    except Exception as e:
+        return f"<p style='color: red;'>An unexpected error occurred during prediction: {e}</p>"
+
+
+# --- GRADIO INTERFACE SETUP ---
+if 'ALL_TEAMS' in globals():
+    all_teams_list = ALL_TEAMS
+else:
+    all_teams_list = ["Arsenal", "Man Utd", "Liverpool", "Chelsea"] # Fallback
+
+iface = gr.Interface(
+    fn=predict_match_outcome,
+    inputs=[
+        gr.Dropdown(all_teams_list, label="Home Team", value=all_teams_list[0] if all_teams_list else "Arsenal"),
+        gr.Dropdown(all_teams_list, label="Away Team", value=all_teams_list[1] if len(all_teams_list) > 1 else "Liverpool")
+    ],
+    outputs=gr.HTML(label="Match Result Visualization"),
+    title="⚽ GOALITICS ⚽",
+    description="Select two teams to predict the full-time result using the optimized XGBoost model. The central ball visualization indicates the predicted winner.",
+    css=CUSTOM_CSS
+)
+
+# Launch the interface
+iface.launch()
