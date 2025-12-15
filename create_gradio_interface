@@ -1,0 +1,46 @@
+import gradio as gr
+import pandas as pd
+import numpy as np
+
+# Ensure the required variables are available from previous cells
+# predict_match_outcome, df, final_best_pipeline, le
+
+# The predict_match_outcome function is already defined in the previous cell.
+# We need to make sure it's accessible.
+# For a Gradio interface, it's good practice to wrap the prediction logic
+# in a function that takes only the Gradio input components as arguments.
+
+def gradio_predict_wrapper(home_team_name, away_team_name):
+    """
+    Wrapper function for predict_match_outcome to be used with Gradio.
+    """
+    # Use the existing global variables defined in the notebook context
+    # (df, final_best_pipeline, le)
+    prediction = predict_match_outcome(
+        home_team_name,
+        away_team_name,
+        df,  # full_data_df
+        final_best_pipeline,
+        le   # label_encoder
+    )
+    return prediction
+
+# Get a list of all unique team names for the dropdowns
+all_teams = pd.concat([df['HomeTeam'], df['AwayTeam']]).unique().tolist()
+all_teams.sort() # Sort alphabetically for better usability
+
+# Create the Gradio interface
+iface = gr.Interface(
+    fn=gradio_predict_wrapper,
+    inputs=[
+        gr.Dropdown(all_teams, label="Home Team"),
+        gr.Dropdown(all_teams, label="Away Team")
+    ],
+    outputs="text",
+    title="EPL Match Outcome Predictor",
+    description="Select two English Premier League teams to predict the match outcome based on historical form and an XGBoost model.",
+    live=False # Set to True if you want predictions to update as you type/select
+)
+
+print("\nLaunching Gradio interface...")
+iface.launch(share=True)
