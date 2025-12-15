@@ -1,0 +1,109 @@
+import pandas as pd
+from sklearn.model_selection import StratifiedKFold, GridSearchCV
+from sklearn.preprocessing import LabelEncoder, StandardScaler, OneHotEncoder
+from sklearn.compose import ColumnTransformer
+import xgboost as xgb
+from imblearn.over_sampling import SMOTE
+from imblearn.pipeline import Pipeline as ImbPipeline
+from sklearn.metrics import accuracy_score, f1_score, make_scorer
+
+# --- Recreate Data and Preprocessor ---
+# Load the enriched dataset
+df = pd.read_csv('epl_with_agent_features.csv')
+
+# Target Encoding
+le = LabelEncoder()
+df['Target'] = le.fit_transform(df['FullTimeResult'])
+
+# Feature Selection
+numerical_features = ['HomeShots', 'AwayShots', 'HomeShotsOnTarget', 'AwayShotsOnTarget',
+                      'HomeCorners', 'AwayCorners', 'HomeFouls', 'AwayFouls',
+                      'HomeYellowCards', 'AwayYellowCards', 'HomeRedCards', 'AwayRedCards',
+                      'Home_Optimal_Form_Score', 'Away_Optimal_Form_Score', 'Optimal_Form_Differential']
+categorical_features = ['HomeTeam', 'AwayTeam']
+
+X = df[numerical_features + categorical_features]
+y = df['Target']
+
+# Time-Series Train-Test Split (80/20 split - We use the full X_train for K-Fold Cross-Validation)
+split_point = int(0.8 * len(X))
+X_train, X_test = X.iloc[:split_point], X.iloc[split_point:]
+y_train, y_test = y.iloc[:split_point], y.iloc[split_point:]
+
+# Preprocessing Pipeline Definition
+preprocessor = ColumnTransformer(
+    transformers=[
+        ('num', StandardScaler(), numerical_features),
+        ('cat', OneHotEncoder(handle_unknown='ignore'), categorical_features)
+    ],
+    remainder='passthrough'
+)
+
+# --- DELIVERABLE 4: HYPERPARAMETER TUNING SETUP ---
+
+# 1. Define the XGBoost Classifier
+xgb_classifier = xgb.XGBClassifier(
+    objective='multi:softmax',          # Multi-class objective
+    num_class=3,                        # 3 classes (H, D, A)
+    eval_metric='mlogloss',             # Evaluation metric
+    random_state=42,
+    n_estimators=100,
+    use_label_encoder=False
+)
+
+# 2. Define the Imblearn Pipeline (Preprocessing -> SMOTE -> XGBoost)
+smote_sampler = SMOTE(random_state=42)
+pipeline = ImbPipeline(steps=[
+    ('preprocessor', preprocessor),
+    ('sampler', smote_sampler),
+    ('classifier', xgb_classifier)
+])
+
+# 3. Define the Hyperparameter Grid to Search
+# We focus on parameters that significantly impact model complexity and speed.
+param_grid = {
+    'classifier__max_depth': [3, 5, 7],         # Max depth of each tree
+    'classifier__learning_rate': [0.1, 0.05],   # Step size shrinkage
+    'classifier__gamma': [0, 0.5]               # Minimum loss reduction required to make a further partition
+}
+
+# 4. Define the Scoring Metric
+# We use Macro F1-Score as the primary metric to optimize the model,
+# as it balances accuracy and solves the imbalance problem.
+scorer = make_scorer(f1_score, average='macro')
+
+# 5. Define Cross-Validation Strategy
+# Stratified K-Fold ensures each fold has the same ratio of H, D, A classes.
+# We use TimeSeriesSplit for the K-Fold to respect the time order.
+from sklearn.model_selection import TimeSeriesSplit
+time_split = TimeSeriesSplit(n_splits=3)
+
+
+# 6. Initialize Grid Search
+# Grid Search will fit the model 3 times for each combination in the param_grid
+grid_search = GridSearchCV(
+    estimator=pipeline,
+    param_grid=param_grid,
+    scoring=scorer,       # Optimize for Macro F1-Score
+    cv=time_split,        # Use time-series cross-validation
+    verbose=1,
+    n_jobs=-1             # Use all CPU cores
+)
+
+print("\n--- Starting Grid Search for Hyperparameter Tuning (Optimizing Macro F1-Score) ---")
+grid_search.fit(X_train, y_train)
+
+# --- 7. Final Evaluation on the Test Set ---
+best_model = grid_search.best_estimator_
+y_pred = best_model.predict(X_test)
+
+# Calculate Final Metrics
+final_accuracy = accuracy_score(y_test, y_pred)
+final_f1_macro = f1_score(y_test, y_pred, average='macro', zero_division=0)
+# Note: We skip precision/recall/AUC here as the goal is to report the final optimized F1/Accuracy
+
+print("\n\n--- Final Optimized XGBoost Model Performance ---")
+print(f"Best Parameters Found: {grid_search.best_params_}")
+print("-" * 40)
+print(f"Final Accuracy on Test Set: {final_accuracy:.4f}")
+print(f"Final Macro F1-Score on Test Set: {final_f1_macro:.4f}")
